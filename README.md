@@ -1,4 +1,4 @@
-# rtx3050m-lab
+# rtx-3050m-labs
 
 Исследование пределов **NVIDIA RTX 3050 Laptop (GA107M, 4 ГБ GDDR6)** под Linux: Dynamic Boost,
 поиск стабильного разгона ядра и памяти, бэкап и прошивка vBIOS. Проверено на ASUS Vivobook Pro 15
@@ -32,6 +32,31 @@ SHA256 `bc369185…63bc7e7`) и патчер [nvflashk-linux](https://github.com
 | `patch-boardid` | неудачный эксперимент, оставлен для истории, **не использовать** |
 
 Результаты тестов пишутся в `results/`.
+
+## Быстрый старт
+
+```sh
+# 1. Dynamic Boost: от сети, профиль performance
+echo performance | sudo tee /sys/firmware/acpi/platform_profile
+nvidia-smi -q -d POWER | grep -i limit           # Max Power Limit 50 W, под нагрузкой до 50 W
+
+# 2. Потолок ядра (шаг 25 MHz, по 60 с на шаг)
+./gpu-limit-find --duration 60
+
+# 3. Потолок памяти при выбранном ядре (шаг 250, по 45 с)
+./gpu-mem-find --core 150 --step 250 --max 3000 --duration 45
+
+# 4. Долгая проверка итоговой пары: 15 мин память, 15 мин вычисления
+./gpu-mem-find --core 150 --start 2000 --max 2000 --duration 900
+sudo ./nv-oc set 150 2000 && (cd tools/gpu-burn && ./gpu_burn 900)
+
+# Бэкап и прошивка: только из TTY (Ctrl+Alt+F2), драйвер NVIDIA выгружается
+sudo ./gpu-backup
+sudo ./gpu-flash firmware/vbios-full-backup.rom            # откат на свой бэкап
+```
+
+Оффсеты живут в драйвере и сбрасываются, когда карта засыпает (RTD3) или при перезагрузке.
+vivobook-tune ставит их заново автоматически, без него нужно повторить `nv-oc set`.
 
 ## Что выяснили
 
