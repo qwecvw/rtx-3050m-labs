@@ -14,9 +14,19 @@ M6500QC (плата Board ID 02A6, vBIOS 94.07.5B.00.97, 35/50 W), драйве�
 sudo ./setup.sh    # CUDA, gpu-burn (sm_86), memtest_vulkan, политика D-Bus для nvidia-powerd
 ```
 
-nvflash скачивается вручную с TechPowerUp (там капча). Для бэкапа подходит любая свежая версия,
-для обхода Board ID нужна именно Linux 5.792.0 (лежит в архиве `nvflash_5.792_linux.zip`,
+nvflash скачивается вручную с TechPowerUp (там капча). Для бэкапа подходит любая свежая версия.
+Для обхода Board ID нужна именно Linux **5.792.0** (архив `nvflash_5.792_linux.zip`,
 SHA256 `bc369185…63bc7e7`) и патчер [nvflashk-linux](https://github.com/y0usaf/nvflashk-linux).
+Патчер подключён как submodule в `third_party/`, на проверенном коммите `2fb4719`
+(читает файл, меняет 9 байт в двух местах, сверяет SHA256 на входе и выходе, сети и `unsafe` нет):
+
+```sh
+git clone --recurse-submodules ssh://git@git.coboto.ru:30909/yura/rtx-3050m-labs.git
+unzip nvflash_5.792_linux.zip -d tools/nvflash-5.792
+./make-nvflashk tools/nvflash-5.792/x64/nvflash      # нужен Rust (rustup.rs) -> tools/nvflashk
+```
+
+Сам nvflash и пропатченный `nvflashk` в репозиторий не входят: это софт NVIDIA.
 
 ## Скрипты
 
@@ -29,6 +39,7 @@ SHA256 `bc369185…63bc7e7`) и патчер [nvflashk-linux](https://github.com
 | `gpu-flash` | прошивка с проверками: полный бэкап, зарядка, ≥50 %, чтение назад (только из TTY) |
 | `gpu-dump` | дамп через sysfs: только legacy-часть 64 КБ, **для восстановления не годится** |
 | `rom-inspect` | сравнение образов: Board ID, subsystem, версия |
+| `make-nvflashk` | собирает патчер из `third_party/` и делает `tools/nvflashk` из nvflash 5.792.0 |
 | `patch-boardid` | неудачный эксперимент, оставлен для истории, **не использовать** |
 
 Результаты тестов пишутся в `results/`.

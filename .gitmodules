@@ -1,0 +1,3 @@
+[submodule "third_party/nvflashk-linux"]
+	path = third_party/nvflashk-linux
+	url = https://github.com/y0usaf/nvflashk-linux
