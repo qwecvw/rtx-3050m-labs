@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Compare NVIDIA full vBIOS images (NVGI header) without flashing anything.
+
+  ./rom-inspect <reference.rom> <calibration.rom> <calib-board-id> [candidate.rom ...]
+
+reference   = our full backup (vbios-full-backup.rom, Board ID 02A6 per nvflash)
+calibration = a ROM whose Board ID nvflash already told us (donor-acer-60w.rom = 02A3)
+Offsets where reference holds 02A6 and calibration holds 02A3 are where the Board ID
+lives; each candidate is then read at those offsets.
+"""
+import re
+import struct
+import sys
+
+REF_BOARD = 0x02A6
+
+
+def load(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def info(path, data):
+    sub = "?"
+    if data[:4] == b"NVGI":
+        v, d = struct.unpack_from("<HH", data, 0xC)
+        sub = f"{v:04X}:{d:04X}"
+    ver = re.search(rb"Version (\d\d\.\d\d\.[0-9A-F]{2}\.[0-9A-F]{2}\.[0-9A-F]{2})", data)
+    name = re.search(rb"([A-Z0-9]{4,} SKU \d+[^\x00]{0,20})", data)
+    return (f"{path}: {len(data)} bytes, header {data[:4]!r}, subsystem {sub}, "
+            f"vBIOS {ver.group(1).decode() if ver else '?'}, "
+            f"{name.group(1).decode(errors='replace').strip() if name else ''}")
+
+
+def main():
+    if len(sys.argv) < 4:
+        sys.exit(__doc__)
+    ref, cal = load(sys.argv[1]), load(sys.argv[2])
+    cal_id = int(sys.argv[3], 16)
+    print(info(sys.argv[1], ref))
+    print(info(sys.argv[2], cal))
+    if ref[:4] != b"NVGI":
+        sys.exit("reference is not a full NVGI image: make the backup with gpu-backup first")
+
+    a, b = struct.pack("<H", REF_BOARD), struct.pack("<H", cal_id)
+    offs = [i for i in range(min(len(ref), len(cal)) - 1) if ref[i:i + 2] == a and cal[i:i + 2] == b]
+    print(f"\nBoard ID offsets (ref {REF_BOARD:04X} / calib {cal_id:04X}): {[hex(o) for o in offs] or 'none'}")
+    if not offs:
+        sys.exit("no common offset: layouts differ, compare the candidates by hand")
+
+    for path in sys.argv[4:]:
+        d = load(path)
+        print("\n" + info(path, d))
+        ids = {f"{struct.unpack_from('<H', d, o)[0]:04X}" for o in offs if o + 2 <= len(d)}
+        verdict = "MATCH 02A6" if ids == {"02A6"} else "different board"
+        print(f"  Board ID at those offsets: {sorted(ids)}  -> {verdict}")
+
+
+if __name__ == "__main__":
+    main()

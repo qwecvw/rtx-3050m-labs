@@ -1,0 +1,35 @@
+#!/bin/sh
+# Dump the NVIDIA GPU vBIOS to a file.
+# Two methods: sysfs ROM (always works), nvflash (if installed).
+# Run: sudo ./gpu-dump [output.rom]
+set -e
+[ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
+
+dev=""
+for d in /sys/bus/pci/devices/*; do
+  [ "$(cat $d/vendor)" = "0x10de" ] && case "$(cat $d/class)" in 0x03*) dev=$d; break ;; esac
+done
+[ -n "$dev" ] || { echo "no NVIDIA GPU found"; exit 1; }
+
+ver=$(nvidia-smi --query-gpu=vbios_version --format=csv,noheader 2>/dev/null || echo "unknown")
+name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "unknown")
+sub=$(cat $dev/subsystem_vendor):$(cat $dev/subsystem_device)
+plim=$(nvidia-smi --query-gpu=power.default_limit,power.max_limit --format=csv,noheader 2>/dev/null || echo "unknown")
+
+echo "GPU:       $name"
+echo "vBIOS:     $ver"
+echo "PCI:       $(basename $dev)"
+echo "Subsystem: $sub"
+echo "Power:     $plim"
+
+out=${1:-firmware/vbios-$(echo "$ver" | tr ' .' '-').rom}
+
+echo 1 > $dev/rom
+cat $dev/rom > "$out"
+echo 0 > $dev/rom
+
+size=$(wc -c < "$out")
+echo "Dumped $size bytes to $out"
+echo "SHA256: $(sha256sum "$out" | cut -d' ' -f1)"
+echo ""
+echo "Keep this backup safe. You will need it to restore the original vBIOS."

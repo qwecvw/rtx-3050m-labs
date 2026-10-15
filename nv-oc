@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""NVIDIA clock offsets through NVML (libnvidia-ml, no extra packages).
+
+  nv-oc get                  print "core mem" offsets in MHz
+  nv-oc set <core> <mem>     apply offsets (root); they shift the V/F curve, voltage is not raised
+
+Offsets live in the driver: they are lost when the GPU powers off (RTD3 sleep, reboot),
+so cpu-fan-guard re-applies the saved ones each time the GPU wakes up.
+"""
+import ctypes as C
+import sys
+
+nv = C.CDLL("libnvidia-ml.so.1")
+
+
+def check(rc, what):
+    if rc != 0:
+        msg = nv.nvmlErrorString
+        msg.restype = C.c_char_p
+        sys.exit(f"{what}: {msg(rc).decode()}")
+
+
+def main():
+    check(nv.nvmlInit_v2(), "init")
+    dev = C.c_void_p()
+    check(nv.nvmlDeviceGetHandleByIndex_v2(0, C.byref(dev)), "device")
+    try:
+        if sys.argv[1:] == ["get"]:
+            core, mem = C.c_int(), C.c_int()
+            check(nv.nvmlDeviceGetGpcClkVfOffset(dev, C.byref(core)), "get core")
+            check(nv.nvmlDeviceGetMemClkVfOffset(dev, C.byref(mem)), "get mem")
+            print(core.value, mem.value)
+        elif len(sys.argv) == 4 and sys.argv[1] == "set":
+            core, mem = int(sys.argv[2]), int(sys.argv[3])
+            check(nv.nvmlDeviceSetGpcClkVfOffset(dev, C.c_int(core)), "set core")
+            check(nv.nvmlDeviceSetMemClkVfOffset(dev, C.c_int(mem)), "set mem")
+        else:
+            sys.exit(__doc__)
+    finally:
+        nv.nvmlShutdown()
+
+
+if __name__ == "__main__":
+    main()

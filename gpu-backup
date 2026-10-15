@@ -1,0 +1,52 @@
+#!/bin/sh
+# Full NVIDIA EEPROM backup with nvflash (the sysfs ROM dump from gpu-dump is only the
+# 64 KB legacy image and cannot restore the card).
+# MUST be run from a text console (Ctrl+Alt+F2): the NVIDIA driver has to be unloaded.
+# Run: sudo ./gpu-backup        -> firmware/vbios-full-backup.rom (+ a second read to verify)
+set -e
+[ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
+mkdir -p "$(dirname "$0")/firmware"; cd "$(dirname "$0")/firmware"
+out=vbios-full-backup.rom
+[ ! -f $out ] || { echo "$out already exists, move it away first"; exit 1; }
+command -v nvflash >/dev/null || { echo "nvflash not installed"; exit 1; }
+
+svcs="hw-lab cpu-fan-guard nvidia-powerd"  # hw-lab and cpu-fan-guard poll the GPU and keep the driver busy
+restart() { for s in $svcs; do systemctl start $s 2>/dev/null || true; done; systemctl start lightdm 2>/dev/null || true; }
+fail() {  # stay on this console so the message can be read
+  echo ""; echo "ERROR: $*"; echo "Nothing was written to the GPU. Return to the desktop: sudo systemctl start lightdm"
+  for s in $svcs; do systemctl start $s 2>/dev/null || true; done; exit 1
+}
+
+echo "Stopping display manager and nvidia-powerd..."
+systemctl stop lightdm 2>/dev/null || true
+for s in $svcs; do systemctl stop $s 2>/dev/null || true; done
+sleep 2
+for m in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do modprobe -r $m 2>/dev/null || true; done
+if lsmod | grep -q '^nvidia'; then
+  lsmod | grep '^nvidia'
+  fuser -v /dev/nvidia* 2>&1 || true
+  fail "NVIDIA driver still loaded (processes above hold it). Close them and run again."
+fi
+
+echo "Reading EEPROM (1/2)..."
+nvflash --save $out
+echo "Reading EEPROM (2/2, verify)..."
+nvflash --save /tmp/vbios-verify.rom
+if ! cmp -s $out /tmp/vbios-verify.rom; then
+  rm -f $out /tmp/vbios-verify.rom; fail "two reads differ, backup not trusted"
+fi
+rm -f /tmp/vbios-verify.rom
+
+magic=$(head -c 4 $out)
+size=$(wc -c < $out)
+echo "Size: $size bytes, header: $magic"
+[ "$magic" = NVGI ] || echo "WARNING: header is not NVGI, check the file before relying on it"
+sha256sum $out | tee $out.sha256
+chown "${SUDO_USER:-root}": $out $out.sha256 2>/dev/null || true
+cp $out "/home/${SUDO_USER:-root}/vbios-full-backup.rom.copy" 2>/dev/null || true
+
+echo ""
+echo "Backup OK. Second copy: ~/vbios-full-backup.rom.copy (also put one on a USB stick)."
+echo "Rebooting in 5 s..."
+sleep 5
+reboot

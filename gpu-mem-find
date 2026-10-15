@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""gpu-mem-find: find the NVIDIA memory overclock ceiling with memtest_vulkan.
+
+  ./gpu-mem-find [--step 100] [--max 2000] [--duration 60] [--core N]
+
+Each step sets the memory offset (core offset stays at --core, default: the lab profile's),
+runs memtest_vulkan and records errors and the measured bandwidth. Stops on:
+  - any memory error;
+  - bandwidth below the best seen so far by more than --drop % (GDDR6 EDC retries:
+    the clock went up but data is being resent, so the card is effectively slower).
+The best offset is the one with the highest bandwidth and no errors. With vivobook-tune installed it requires its lab mode (hw-lab watchdog).
+"""
+import argparse
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+MEMTEST = os.path.join(HERE, "tools", "memtest_vulkan", "memtest_vulkan")
+RESULTS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "results")
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+CPUTUNE = "/usr/local/bin/cpu-tune"  # vivobook-tune integration: saves offsets to its lab profile
+
+
+def gpu_cmd(*args):
+    """nvoc <core> <mem> | nvclock <MHz>|reset -> (rc, output). Uses cpu-tune when installed,
+    otherwise nv-oc / nvidia-smi directly (the script then runs as root)."""
+    if os.path.exists(CPUTUNE):
+        cmd = ["sudo", "-n", CPUTUNE, *map(str, args)]
+    elif args[0] == "nvoc":
+        cmd = [os.path.join(HERE, "nv-oc"), "set", str(args[1]), str(args[2])]
+    elif args[1] == "reset":
+        cmd = ["nvidia-smi", "-rgc"]
+    else:
+        cmd = ["nvidia-smi", "-lgc", f"0,{args[1]}"]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    return p.returncode, (p.stderr or p.stdout).strip()
+
+
+def need_root_or_cputune():
+    if not os.path.exists(CPUTUNE) and os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", sys.executable, *sys.argv])
+
+
+def check_watchdog():
+    """vivobook-tune's lab mode runs the hw-lab watchdog; without it, warn and carry on."""
+    try:
+        with open("/etc/cpu-menu/mode") as f:
+            mode = f.read().strip()
+    except OSError:
+        print("NOTE: no hw-lab watchdog (vivobook-tune not installed): watch the GPU temperature yourself.")
+        return
+    if mode != "lab":
+        sys.exit("vivobook-tune is installed: switch to lab mode first (power-mode lab), it runs the watchdog")
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def set_offset(core, mem, fatal=True):
+    rc, msg = gpu_cmd("nvoc", core, mem)
+    if rc != 0:
+        if not fatal:
+            print(f"cannot set offset +{core}/+{mem} (GPU crashed? check dmesg for Xid, reboot)")
+            return
+        sys.exit(f"cannot set offset +{core}/+{mem}: {msg}")
+    time.sleep(1)
+
+
+def memtest(seconds):
+    """Run memtest_vulkan on the NVIDIA card; return (errors_found, bandwidth GB/s, last line)."""
+    p = subprocess.Popen([MEMTEST], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    p.stdin.write("\n")  # accept the default device (1 = the RTX 3050)
+    p.stdin.close()  # EOF also answers its "press any key" prompt after Ctrl+C
+    try:
+        p.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGINT)  # memtest_vulkan runs the test in a child process
+        try:
+            p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+    out = p.stdout.read()
+    tested = re.search(r"test of (1: .*)", out)
+    if not tested or "NVIDIA" not in tested.group(1):
+        sys.exit("memtest_vulkan did not test the NVIDIA card:\n" + out[-500:])
+    bw = [float(x) for x in re.findall(r"checked:\s+[\d.]+GB\s+([\d.]+)GB/sec", out)]
+    errors = bool(re.search(r"error", out, re.I)) and "no any errors" not in out
+    last = [l for l in out.splitlines() if "iteration" in l or "rror" in l]
+    return errors, (bw[-1] if bw else 0.0), (last[-1].strip() if last else out[-200:])
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--step", type=int, default=100)
+    ap.add_argument("--max", type=int, default=2000)
+    ap.add_argument("--duration", type=int, default=60)
+    ap.add_argument("--start", type=int, default=0)
+    ap.add_argument("--core", type=int, default=None)
+    ap.add_argument("--cap", type=int, default=None, help="core clock ceiling in MHz while testing (nvidia-smi -lgc)")
+    ap.add_argument("--drop", type=float, default=1.0, help="stop if bandwidth falls this %% below best")
+    a = ap.parse_args()
+
+    need_root_or_cputune()
+    check_watchdog()
+    if not os.access(MEMTEST, os.X_OK):
+        sys.exit(f"memtest_vulkan not found: {MEMTEST}")
+    core = a.core if a.core is not None else int((read("/etc/cpu-menu/lab/nvoc", "0 0").split() + ["0"])[0])  # 0 without vivobook-tune
+
+    # Keep the GPU awake for the whole run: offsets are lost when it drops into RTD3 sleep
+    keeper = subprocess.Popen(["nvidia-smi", "--query-gpu=clocks.mem", "--format=csv,noheader", "-lms", "1000"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)
+    if a.cap:  # set while the keeper holds the GPU awake: the lock is lost when it sleeps
+        gpu_cmd("nvclock", a.cap)
+    os.makedirs(RESULTS, exist_ok=True)
+    log = open(f"{RESULTS}/mem-find-{time.strftime('%Y%m%d-%H%M%S')}.csv", "w")
+    log.write("mem_offset,core_offset,mem_clock_mhz,bandwidth_gbs,errors\n")
+
+    best_off, best_bw = a.start, 0.0
+    try:
+        off = a.start
+        while off <= a.max:
+            set_offset(core, off)
+            clk = subprocess.run(["nvidia-smi", "--query-gpu=clocks.max.mem", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True).stdout.strip()
+            print(f"mem +{off:<5} (core +{core}, max mem clock {clk} MHz) ... ", end="", flush=True)
+            errors, bw, last = memtest(a.duration)
+            log.write(f"{off},{core},{clk},{bw},{int(errors)}\n")
+            log.flush()
+            if errors:
+                print(f"ERRORS  {bw:.1f} GB/s\n    {last}")
+                break
+            gain = f"{(bw / best_bw - 1) * 100:+.1f}%" if best_bw else ""
+            print(f"ok  {bw:.1f} GB/s  {gain}")
+            if best_bw and bw < best_bw * (1 - a.drop / 100):
+                print("    bandwidth dropped: EDC retries, past the useful limit")
+                break
+            if bw > best_bw:
+                best_off, best_bw = off, bw
+            off += a.step
+    finally:
+        set_offset(core, best_off, fatal=False)
+        if a.cap:
+            gpu_cmd("nvclock", "reset")
+        keeper.terminate()
+        log.close()
+
+    print(f"\nBest: mem +{best_off} MHz, {best_bw:.1f} GB/s (core +{core}). Applied.")
+    print("Confirm with a long run: ./gpu-mem-find --start", best_off, "--max", best_off, "--duration 900")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,5 @@
+GPU Stability Ceiling (2026-10-15 19:59)
+Core offset: +250 MHz
+Memory offset: +0 MHz
+Test duration: 60s per step, 300s final
+Peak temp: 53°C, Power: 8.35W

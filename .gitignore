@@ -1,0 +1,11 @@
+# Firmware images: NVIDIA/OEM licensed and board-specific
+firmware/
+*.rom
+
+# Third-party tools and NVIDIA binaries (setup.sh / README explain how to get them)
+tools/
+
+# Raw run output (summaries live in README)
+results/*.log
+__pycache__/
+*.pyc

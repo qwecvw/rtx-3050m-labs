@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""gpu-limit-find: automated GPU stability ceiling finder.
+
+Gradually raises NVIDIA clock offsets in steps, running gpu-burn at each step
+to verify compute correctness. Stops at the first failure and reports the last
+stable offset. With vivobook-tune installed it requires lab mode (hw-lab watchdog).
+
+Usage:
+  ./gpu-limit-find [--core-step 25] [--mem-step 250] [--duration 60] [--start-core 0] [--start-mem 0]
+
+Phases:
+  1. Core clock: raise in steps, mem at 0, gpu-burn each step
+  2. Memory clock: raise in steps, core at best stable, gpu-burn each step
+  3. Combined: verify both at max stable for a longer run
+"""
+import argparse
+import csv
+import os
+import re
+import subprocess
+import sys
+import time
+
+NVOC = "/usr/local/bin/nv-oc"
+LOGDIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "results")
+BURN_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tools", "gpu-burn")
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+CPUTUNE = "/usr/local/bin/cpu-tune"  # vivobook-tune integration: saves offsets to its lab profile
+
+
+def gpu_cmd(*args):
+    """nvoc <core> <mem> | nvclock <MHz>|reset -> (rc, output). Uses cpu-tune when installed,
+    otherwise nv-oc / nvidia-smi directly (the script then runs as root)."""
+    if os.path.exists(CPUTUNE):
+        cmd = ["sudo", "-n", CPUTUNE, *map(str, args)]
+    elif args[0] == "nvoc":
+        cmd = [os.path.join(HERE, "nv-oc"), "set", str(args[1]), str(args[2])]
+    elif args[1] == "reset":
+        cmd = ["nvidia-smi", "-rgc"]
+    else:
+        cmd = ["nvidia-smi", "-lgc", f"0,{args[1]}"]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    return p.returncode, (p.stderr or p.stdout).strip()
+
+
+def need_root_or_cputune():
+    if not os.path.exists(CPUTUNE) and os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", sys.executable, *sys.argv])
+
+
+def check_watchdog():
+    """vivobook-tune's lab mode runs the hw-lab watchdog; without it, warn and carry on."""
+    try:
+        with open("/etc/cpu-menu/mode") as f:
+            mode = f.read().strip()
+    except OSError:
+        print("NOTE: no hw-lab watchdog (vivobook-tune not installed): watch the GPU temperature yourself.")
+        return
+    if mode != "lab":
+        sys.exit("vivobook-tune is installed: switch to lab mode first (power-mode lab), it runs the watchdog")
+
+
+def run(cmd, timeout=300):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return -1, "", "timeout"
+
+
+LAST_OFFSET = None
+
+
+def set_offset(core, mem, quiet=False):
+    global LAST_OFFSET
+    LAST_OFFSET = (core, mem)
+    rc, msg = gpu_cmd("nvoc", core, mem)
+    if rc != 0:
+        print(f"  ERROR setting offset +{core}/+{mem}: {msg}")
+        return False
+    time.sleep(1)
+    return True
+
+
+def check_gpu_awake():
+    for d in sorted(os.listdir("/sys/bus/pci/devices")):
+        p = f"/sys/bus/pci/devices/{d}"
+        try:
+            with open(f"{p}/vendor") as f:
+                if f.read().strip() != "0x10de":
+                    continue
+            with open(f"{p}/power/runtime_status") as f:
+                if f.read().strip() == "active":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def gpu_burn(seconds):
+    """Run gpu-burn while sampling the GPU every 2 s. Returns (passed, output, stats)."""
+    proc = subprocess.Popen(["./gpu_burn", str(seconds)], cwd=BURN_DIR, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    samples = []
+    t0 = time.monotonic()
+    reapplied = False
+    while proc.poll() is None:
+        time.sleep(2)
+        if not reapplied and LAST_OFFSET:
+            # the GPU may have been asleep (RTD3) and lost the offsets: put them back now it is awake
+            set_offset(*LAST_OFFSET, quiet=True)
+            reapplied = True
+        info = read_gpu_info()
+        if info and time.monotonic() - t0 > 5:  # skip the ramp-up
+            samples.append(info)
+        if time.monotonic() - t0 > seconds + 60:
+            proc.kill()
+            return False, "timeout", {}
+    full = proc.stdout.read()
+    gflops = re.findall(r"\((\d+) Gflop/s\)", full)
+    stats = {}
+    if samples:
+        stats = {"temp": max(x["temp"] for x in samples),
+                 "power": sum(x["power"] for x in samples) / len(samples),
+                 "clock": sum(x["clock"] for x in samples) // len(samples)}
+    if gflops:
+        stats["gflops"] = int(gflops[-1])
+    if proc.returncode != 0 or "FAULTY" in full.upper() or "DIED" in full.upper() \
+            or re.search(r"errors: [1-9]", full):
+        return False, full, stats
+    return True, full, stats
+
+
+def fmt(st):
+    if not st:
+        return ""
+    return (f"{st.get('temp', '?')}°C max, {st.get('power', 0):.1f} W avg, "
+            f"{st.get('clock', '?')} MHz avg, {st.get('gflops', '?')} GFLOPS")
+
+
+def stress_gpu_brief():
+    """Quick 10s smoke test to wake GPU and verify basic function."""
+    ok, out, _ = gpu_burn(10)
+    return ok
+
+
+def read_gpu_info():
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu,power.draw,clocks.gr",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+        parts = [x.strip() for x in out.split(",")]
+        return {"temp": int(parts[0]), "power": float(parts[1]), "clock": int(parts[2])}
+    except Exception:
+        return {}
+
+
+def find_limit(name, setter, start, step, duration):
+    """Binary-search-ish: raise offset in steps until failure, report last stable."""
+    print(f"\n{'='*60}")
+    print(f"  Finding {name} limit: start={start}, step={step}, test={duration}s each")
+    print(f"{'='*60}")
+
+    last_stable = start
+    current = start
+
+    while True:
+        current += step
+        print(f"\n  Testing {name} = +{current} MHz ...")
+
+        if not setter(current):
+            print(f"  Could not set offset +{current}, stopping")
+            break
+
+        ok, out, st = gpu_burn(duration)
+        if ok:
+            print(f"  +{current} MHz: STABLE  {fmt(st)}")
+            last_stable = current
+            continue
+        print(f"  +{current} MHz: FAILED  {fmt(st)}")
+        for line in out.splitlines()[-3:]:
+            if line.strip():
+                print(f"    {line.strip()[-100:]}")
+        # an error can leave the GPU in a bad state: make sure the last good value still passes
+        setter(last_stable)
+        ok2, _, st2 = gpu_burn(30)
+        print(f"  recheck +{last_stable} MHz: {'ok' if ok2 else 'ALSO FAILS (GPU state, not this step)'}  {fmt(st2)}")
+        break
+
+    print(f"\n  {name} limit: +{last_stable} MHz")
+    return last_stable
+
+
+def main():
+
+    p = argparse.ArgumentParser(description="Find GPU stability ceiling")
+    p.add_argument("--core-step", type=int, default=25, help="Core offset step in MHz (default 25)")
+    p.add_argument("--mem-step", type=int, default=250, help="Memory offset step in MHz (default 250)")
+    p.add_argument("--duration", type=int, default=60, help="gpu-burn seconds per step (default 60)")
+    p.add_argument("--start-core", type=int, default=0, help="Starting core offset (default 0)")
+    p.add_argument("--start-mem", type=int, default=0, help="Starting memory offset (default 0)")
+    p.add_argument("--skip-core", action="store_true", help="Keep core at --start-core, test memory only")
+    p.add_argument("--final", type=int, default=300, help="Final combined test duration (default 300)")
+    args = p.parse_args()
+
+    need_root_or_cputune()
+    check_watchdog()
+
+    if not check_gpu_awake():
+        print("GPU sleeping. Waking with smoke test...")
+
+    print("Smoke test (10s gpu-burn)...")
+    if not stress_gpu_brief():
+        print("ERROR: gpu-burn failed at stock clocks. Fix GPU first.")
+        sys.exit(1)
+    print("Smoke test passed.\n")
+
+    os.makedirs(LOGDIR, exist_ok=True)
+
+    # Phase 1: Core clock limit (memory at start-mem)
+    def set_core(c):
+        return set_offset(c, args.start_mem)
+
+    if args.skip_core:
+        best_core = args.start_core
+    else:
+        best_core = find_limit("Core clock", set_core, args.start_core, args.core_step, args.duration)
+
+    # Reset to best stable core before memory test
+    set_offset(best_core, args.start_mem)
+
+    # Phase 2: Memory clock limit (core at best stable)
+    def set_mem(m):
+        return set_offset(best_core, m)
+
+    best_mem = find_limit("Memory clock", set_mem, args.start_mem, args.mem_step, args.duration)
+
+    # Phase 3: Combined verification
+    print(f"\n{'='*60}")
+    print(f"  Final test: core +{best_core} MHz, mem +{best_mem} MHz for {args.final}s")
+    print(f"{'='*60}")
+
+    set_offset(best_core, best_mem)
+    time.sleep(2)
+
+    ok, out, info = gpu_burn(args.final)
+
+    if ok:
+        print(f"\n  PASSED. GPU stable at +{best_core}/+{best_mem} MHz  {fmt(info)}")
+    else:
+        print(f"\n  FAILED combined test. Backing off core by {args.core_step} MHz")
+        best_core = max(0, best_core - args.core_step)
+        set_offset(best_core, best_mem)
+        ok2, _, info = gpu_burn(args.final)
+        if ok2:
+            print(f"  Stable at +{best_core}/+{best_mem} MHz")
+        else:
+            best_mem = max(0, best_mem - args.mem_step)
+            print(f"  Backed off to +{best_core}/+{best_mem} MHz")
+
+    # Write results
+    result = f"""GPU Stability Ceiling ({time.strftime('%Y-%m-%d %H:%M')})
+Core offset: +{best_core} MHz
+Memory offset: +{best_mem} MHz
+Test duration: {args.duration}s per step, {args.final}s final
+"""
+    if info:
+        result += f"Final run: {fmt(info)}\n"
+
+    print(f"\n{'='*60}")
+    print(result)
+
+    with open(f"{LOGDIR}/best-offsets.txt", "w") as f:
+        f.write(result)
+    print(f"Results saved to {LOGDIR}/best-offsets.txt")
+
+    # Offer to save as lab profile
+    print(f"\nApply: sudo ./nv-oc set {best_core} {best_mem}   (or with vivobook-tune: sudo cpu-tune nvoc {best_core} {best_mem})")
+
+
+if __name__ == "__main__":
+    main()

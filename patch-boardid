@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Patch the Board ID in an NVIDIA vBIOS ROM file.
+WARNING: does not work on Ampere and is unsafe. The real Board ID lives at another offset
+(0x9623, see rom-inspect) and the image is signed by NVIDIA, so any patched ROM fails at
+boot. Kept only as a record of the experiment; never flash its output.
+
+
+Usage: ./patch-boardid <input.rom> <old-board-id> <new-board-id> [output.rom]
+
+Example: ./patch-boardid donor-acer-60w.rom 02A3 02A6
+         Creates donor-acer-60w-patched.rom with Board ID changed.
+
+Only patches in the board info table region (0x19000-0x19600), not in code sections.
+"""
+import hashlib
+import struct
+import sys
+import os
+
+
+def main():
+    if len(sys.argv) < 4:
+        sys.exit(__doc__)
+
+    infile = sys.argv[1]
+    old_hex = sys.argv[2]
+    new_hex = sys.argv[3]
+    outfile = sys.argv[4] if len(sys.argv) > 4 else infile.replace(".rom", "-patched.rom")
+
+    if not os.path.exists(infile):
+        sys.exit(f"File not found: {infile}")
+
+    old_id = int(old_hex, 16)
+    new_id = int(new_hex, 16)
+
+    with open(infile, "rb") as f:
+        data = bytearray(f.read())
+
+    print(f"ROM: {infile} ({len(data)} bytes)")
+    print(f"Patching Board ID: 0x{old_hex.upper()} -> 0x{new_hex.upper()}")
+
+    old_le = struct.pack("<H", old_id)
+    new_le = struct.pack("<H", new_id)
+
+    # Scan entire ROM for context, but only patch in the board info table region
+    # Board info tables are typically at 0x19000-0x19600 in NVIDIA vBIOS
+    TABLE_START = 0x19000
+    TABLE_END = 0x19600
+
+    all_locs = []
+    for i in range(len(data) - 1):
+        if data[i:i+2] == old_le:
+            region = "TABLE" if TABLE_START <= i <= TABLE_END else "other"
+            all_locs.append((i, region))
+
+    print(f"\nFound {len(all_locs)} total occurrences of 0x{old_hex}:")
+    for loc, region in all_locs:
+        ctx = data[max(0,loc-4):loc].hex() + "[" + data[loc:loc+2].hex() + "]" + data[loc+2:loc+6].hex()
+        mark = " <-- PATCH" if region == "TABLE" else "     skip (code/data)"
+        print(f"  {hex(loc):>10}  {region:>6}  {ctx}{mark}")
+
+    table_locs = [loc for loc, region in all_locs if region == "TABLE"]
+
+    if not table_locs:
+        print(f"\nERROR: no occurrences found in board info table region ({hex(TABLE_START)}-{hex(TABLE_END)})")
+        print("Try adjusting TABLE_START/TABLE_END range.")
+        sys.exit(1)
+
+    print(f"\nPatching {len(table_locs)} occurrence(s) in board info table only:")
+    for loc in table_locs:
+        data[loc:loc+2] = new_le
+        print(f"  {hex(loc)}: patched")
+
+    with open(outfile, "wb") as f:
+        f.write(data)
+
+    print(f"\nSaved: {outfile}")
+    print(f"SHA256: {hashlib.sha256(data).hexdigest()}")
+    print(f"\nFlash: sudo ./gpu-flash {outfile}")
+
+
+if __name__ == "__main__":
+    main()

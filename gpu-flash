@@ -1,0 +1,91 @@
+#!/bin/sh
+# Flash a vBIOS to the NVIDIA GPU, then read it back and compare.
+# MUST be run from a text console (Ctrl+Alt+F2): the NVIDIA driver has to be unloaded.
+#
+#   sudo ./gpu-flash <rom> [nvflash binary]
+#     donor:   sudo ./gpu-flash firmware/donor-acer-60w.rom tools/nvflashk
+#     restore: sudo ./gpu-flash firmware/vbios-full-backup.rom
+#
+# A donor from another board (Board ID mismatch) needs a patched nvflash as the 2nd argument;
+# stock nvflash refuses it. Refuses to run without a verified full backup, on battery or
+# below 50 % charge. GPU clock offsets in the lab profile are reset to 0 (new firmware).
+set -e
+[ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
+here=$(dirname "$(readlink -f "$0")")
+rom=$(readlink -f "${1:?usage: sudo ./gpu-flash <rom> [nvflash]}")
+nvflash=$(readlink -f "${2:-$(command -v nvflash)}")
+backup=$here/firmware/vbios-full-backup.rom
+[ -f "$rom" ] || { echo "no such file: $rom"; exit 1; }
+[ -x "$nvflash" ] || { echo "nvflash not found: $nvflash"; exit 1; }
+
+case "$(basename "$rom")" in *DO-NOT-FLASH*) echo "refusing: $rom is marked DO-NOT-FLASH"; exit 1 ;; esac
+[ "$(head -c 4 "$rom")" = NVGI ] || { echo "not a full NVIDIA image (no NVGI header): $rom"; exit 1; }
+
+# Safety net: a full, checksum-verified backup must exist
+[ -f "$backup" ] || { echo "no full backup ($backup): run sudo ./gpu-backup first"; exit 1; }
+(cd "$here/firmware" && sha256sum -c --quiet vbios-full-backup.rom.sha256) ||
+  { echo "full backup checksum mismatch: not flashing"; exit 1; }
+
+# Power: never on battery, never low
+ac=$(cat /sys/class/power_supply/AC*/online 2>/dev/null | head -1)
+cap=$(cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo 0)
+[ "$ac" = 1 ] || { echo "plug in the charger first"; exit 1; }
+[ "$cap" -ge 50 ] || { echo "battery at $cap %, charge to 50 % or more first"; exit 1; }
+
+echo "=== GPU vBIOS flash ==="
+echo "ROM:     $rom ($(wc -c < "$rom") bytes, SHA256 $(sha256sum "$rom" | cut -c1-16)...)"
+echo "nvflash: $nvflash"
+echo "Backup:  $backup (verified)"
+nvidia-smi --query-gpu=name,vbios_version,power.default_limit,power.max_limit --format=csv,noheader 2>/dev/null || true
+echo ""
+printf "Type FLASH to continue: "
+read ans
+[ "$ans" = FLASH ] || { echo "aborted"; exit 1; }
+
+# New firmware starts from stock clocks
+for p in /etc/cpu-menu/lab /etc/cpu-menu/user; do
+  if [ -f $p/nvoc ]; then echo "0 0" > $p/nvoc; fi
+done
+
+svcs="hw-lab cpu-fan-guard nvidia-powerd"  # hw-lab and cpu-fan-guard poll the GPU and keep the driver busy
+restart() { for s in $svcs; do systemctl start $s 2>/dev/null || true; done; systemctl start lightdm 2>/dev/null || true; }
+fail() {  # stay on this console so the message can be read
+  echo ""; echo "ERROR: $*"; echo "Nothing was written to the GPU. Return to the desktop: sudo systemctl start lightdm"
+  for s in $svcs; do systemctl start $s 2>/dev/null || true; done; exit 1
+}
+
+echo "Stopping display manager and nvidia-powerd..."
+systemctl stop lightdm 2>/dev/null || true
+for s in $svcs; do systemctl stop $s 2>/dev/null || true; done
+sleep 2
+for m in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do modprobe -r $m 2>/dev/null || true; done
+if lsmod | grep -q '^nvidia'; then
+  lsmod | grep '^nvidia'
+  fuser -v /dev/nvidia* 2>&1 || true
+  fail "NVIDIA driver still loaded (processes above hold it). Close them and run again."
+fi
+
+echo ""
+echo "Flashing. DO NOT power off or interrupt."
+"$nvflash" --overridesub -6 "$rom"
+
+echo ""
+echo "Reading back to verify..."
+readback=/tmp/vbios-readback.rom
+rm -f $readback
+"$nvflash" --save $readback
+if cmp -s -n "$(wc -c < "$rom")" "$rom" $readback; then
+  echo "Verify OK: EEPROM matches $rom"
+else
+  echo "WARNING: read-back differs from $rom (some regions may be rewritten by nvflash)."
+  echo "Compare: cmp -l $rom $readback | head"
+fi
+
+echo ""
+echo "After reboot, BEFORE any heavy load:"
+echo "  1. nvidia-smi -q -d POWER   (new limits?)"
+echo "  2. 30 s test on BATTERY: compare nvidia-smi power.draw with the laptop total (BAT0 power_now)"
+echo "Restore: sudo ./gpu-flash firmware/vbios-full-backup.rom $nvflash"
+echo "Rebooting in 10 s (Ctrl+C to stay)..."
+sleep 10
+reboot
