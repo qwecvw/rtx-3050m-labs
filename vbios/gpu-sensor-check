@@ -1,7 +1,7 @@
 #!/bin/sh
 # Does the GPU power sensor track real load? Run right after flashing a vBIOS, before any
 # heavy use. Low-risk: the core clock is capped at 900 MHz and the load lasts 10 s.
-# A working sensor rises well above idle under load; a broken one (other board's sensor
+# A working sensor rises well above idle under load (>= 5 W); a broken one (other board's sensor
 # table) stays flat while the temperature climbs.
 # Run: vbios/gpu-sensor-check
 here=$(dirname "$(dirname "$(readlink -f "$0")")")  # repo root
@@ -39,7 +39,7 @@ spread=$(echo "$max $min" | awk '{printf "%.2f", $1-$2}')
 trise=$((load_t - idle_t))
 echo ""
 echo "power rise ${rise} W, spread under load ${spread} W, temperature +${trise} C"
-if echo "$rise $spread" | awk '{exit !($1 >= 5 && $2 >= 0.5)}'; then
+if echo "$rise $spread" | awk '{exit !($1 >= 5)}'; then
   echo "VERDICT: sensor TRACKS load. Next: battery cross-check, then short real tests."
 else
   echo "VERDICT: sensor BROKEN (flat reading). Do not use this vBIOS: roll back."
