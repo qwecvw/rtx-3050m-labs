@@ -2,14 +2,14 @@
 # Build the nvflashk-linux patcher (third_party submodule) and produce tools/nvflashk:
 # NVFlash 5.792.0 with the Board ID check relaxed for --overridesub.
 #
-#   ./make-nvflashk <path to stock Linux x64 nvflash 5.792.0>
-#   e.g. ./make-nvflashk tools/nvflash-5.792/x64/nvflash   (from nvflash_5.792_linux.zip)
+#   vbios/make-nvflashk <path to stock Linux x64 nvflash 5.792.0>
+#   e.g. vbios/make-nvflashk tools/nvflash-5.792/x64/nvflash   (from nvflash_5.792_linux.zip)
 #
 # The patcher itself rejects any other input (SHA256 check) and verifies its output.
 # NVFlash is NVIDIA software: it is not part of this repository and must not be committed.
 set -e
-here=$(dirname "$(readlink -f "$0")")
-in=$(readlink -f "${1:?usage: ./make-nvflashk <stock nvflash 5.792.0 x64>}")
+here=$(dirname "$(dirname "$(readlink -f "$0")")")  # repo root
+in=$(readlink -f "${1:?usage: vbios/make-nvflashk <stock nvflash 5.792.0 x64>}")
 out=$here/tools/nvflashk
 src=$here/third_party/nvflashk-linux
 want_in=bc36918546a749650a1a28cfd990a506a531b77529b57a7f119ad214563bc7e7
@@ -27,4 +27,4 @@ mkdir -p "$here/tools"
 "$src/target/release/nvflashk-linux" "$in" "$out"
 chmod 755 "$out"
 echo "Ready: $out"
-echo "Flash a donor: sudo ./gpu-flash firmware/<donor>.rom tools/nvflashk   (read the README first)"
+echo "Flash a donor: sudo vbios/gpu-flash firmware/<donor>.rom tools/nvflashk   (read the README first)"

@@ -2,10 +2,11 @@
 # Full NVIDIA EEPROM backup with nvflash (the sysfs ROM dump from gpu-dump is only the
 # 64 KB legacy image and cannot restore the card).
 # MUST be run from a text console (Ctrl+Alt+F2): the NVIDIA driver has to be unloaded.
-# Run: sudo ./gpu-backup        -> firmware/vbios-full-backup.rom (+ a second read to verify)
+# Run: sudo vbios/gpu-backup    -> firmware/vbios-full-backup.rom (+ a second read to verify)
 set -e
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
-mkdir -p "$(dirname "$0")/firmware"; cd "$(dirname "$0")/firmware"
+root=$(dirname "$(dirname "$(readlink -f "$0")")")
+mkdir -p "$root/firmware"; cd "$root/firmware"
 out=vbios-full-backup.rom
 [ ! -f $out ] || { echo "$out already exists, move it away first"; exit 1; }
 command -v nvflash >/dev/null || { echo "nvflash not installed"; exit 1; }

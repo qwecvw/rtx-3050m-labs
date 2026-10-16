@@ -1,0 +1,47 @@
+#!/bin/sh
+# Does the GPU power sensor track real load? Run right after flashing a vBIOS, before any
+# heavy use. Low-risk: the core clock is capped at 900 MHz and the load lasts 10 s.
+# A working sensor rises well above idle under load; a broken one (other board's sensor
+# table) stays flat while the temperature climbs.
+# Run: vbios/gpu-sensor-check
+here=$(dirname "$(dirname "$(readlink -f "$0")")")  # repo root
+burn=$here/tools/gpu-burn
+tune() { if [ -x /usr/local/bin/cpu-tune ]; then sudo -n /usr/local/bin/cpu-tune "$@"; else sudo "$@"; fi; }
+cap() { if [ -x /usr/local/bin/cpu-tune ]; then tune nvclock "$1"; elif [ "$1" = reset ]; then sudo nvidia-smi -rgc; else sudo nvidia-smi -lgc "0,$1"; fi >/dev/null; }
+q() { nvidia-smi --query-gpu="$1" --format=csv,noheader,nounits; }
+
+[ -x "$burn/gpu_burn" ] || { echo "gpu-burn not built: $burn"; exit 1; }
+echo "vBIOS $(q vbios_version), limits $(q power.default_limit) / $(q power.max_limit) W"
+
+nvidia-smi --query-gpu=power.draw --format=csv,noheader -lms 1000 >/dev/null 2>&1 &  # keep it awake
+keep=$!
+trap 'cap reset; kill $keep 2>/dev/null' EXIT
+sleep 3
+cap 900
+
+idle_p=$(q power.draw); idle_t=$(q temperature.gpu)
+echo "idle:  ${idle_p} W, ${idle_t} C"
+(cd "$burn" && timeout 20 ./gpu_burn 10 >/dev/null 2>&1) &
+load=$!
+sleep 4
+min=999; max=0
+for i in 1 2 3 4 5; do
+  p=$(q power.draw); c=$(q clocks.gr)
+  echo "load:  ${p} W, $(q temperature.gpu) C, ${c} MHz"
+  min=$(echo "$p $min" | awk '{print ($1<$2)?$1:$2}'); max=$(echo "$p $max" | awk '{print ($1>$2)?$1:$2}')
+  sleep 1.2
+done
+wait $load
+load_t=$(q temperature.gpu)
+
+rise=$(echo "$max $idle_p" | awk '{printf "%.1f", $1-$2}')
+spread=$(echo "$max $min" | awk '{printf "%.2f", $1-$2}')
+trise=$((load_t - idle_t))
+echo ""
+echo "power rise ${rise} W, spread under load ${spread} W, temperature +${trise} C"
+if echo "$rise $spread" | awk '{exit !($1 >= 5 && $2 >= 0.5)}'; then
+  echo "VERDICT: sensor TRACKS load. Next: battery cross-check, then short real tests."
+else
+  echo "VERDICT: sensor BROKEN (flat reading). Do not use this vBIOS: roll back."
+  exit 1
+fi

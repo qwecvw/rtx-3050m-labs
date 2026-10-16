@@ -1,0 +1,32 @@
+#!/bin/sh
+# Boot without any NVIDIA kernel driver, so nvflash can reach a GPU whose firmware makes the
+# driver hang (RmInitAdapter failed / Xid 62 with processes stuck in D state).
+#   sudo vbios/gpu-recovery-mode on -> reboot -> flash from a TTY -> sudo vbios/gpu-recovery-mode off
+# "install ... /bin/false" blocks explicit loads too (modprobe.blacklist only blocks autoload).
+# The GPU-polling services are masked meanwhile so nothing tries to talk to the card.
+set -e
+[ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
+conf=/etc/modprobe.d/zz-gpu-recovery.conf
+svcs="hw-lab cpu-fan-guard nvidia-powerd nvidia-persistenced"
+
+case "$1" in
+  on)
+    for m in nvidia nvidia_drm nvidia_modeset nvidia_uvm nvidia-drm nvidia-modeset nvidia-uvm; do
+      echo "blacklist $m"; echo "install $m /bin/false"
+    done > $conf
+    for s in $svcs; do systemctl mask "$s" 2>/dev/null || true; done
+    update-initramfs -u
+    echo ""
+    echo "Recovery mode ON. Reboot now (if it hangs on shutdown, hold the power button 10 s)."
+    echo "After boot: Ctrl+Alt+F2, check 'lsmod | grep nvidia' is empty, then:"
+    echo "  cd <repo> && sudo vbios/gpu-flash firmware/vbios-full-backup.rom tools/nvflashk"
+    echo "Then: sudo vbios/gpu-recovery-mode off  (gpu-flash reboots; run it right after login)"
+    ;;
+  off)
+    rm -f $conf
+    for s in $svcs; do systemctl unmask "$s" 2>/dev/null || true; done
+    update-initramfs -u
+    echo "Recovery mode OFF. Reboot to load the NVIDIA driver again."
+    ;;
+  *) echo "usage: sudo vbios/gpu-recovery-mode on|off"; exit 1 ;;
+esac

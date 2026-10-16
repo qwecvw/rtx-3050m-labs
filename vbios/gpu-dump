@@ -1,7 +1,7 @@
 #!/bin/sh
 # Dump the NVIDIA GPU vBIOS to a file.
 # Two methods: sysfs ROM (always works), nvflash (if installed).
-# Run: sudo ./gpu-dump [output.rom]
+# Run: sudo vbios/gpu-dump [output.rom]
 set -e
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 
@@ -22,7 +22,8 @@ echo "PCI:       $(basename $dev)"
 echo "Subsystem: $sub"
 echo "Power:     $plim"
 
-out=${1:-firmware/vbios-$(echo "$ver" | tr ' .' '-').rom}
+root=$(dirname "$(dirname "$(readlink -f "$0")")")
+out=${1:-$root/firmware/vbios-$(echo "$ver" | tr ' .' '-').rom}
 
 echo 1 > $dev/rom
 cat $dev/rom > "$out"

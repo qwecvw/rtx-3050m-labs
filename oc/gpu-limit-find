@@ -22,8 +22,9 @@ import sys
 import time
 
 NVOC = "/usr/local/bin/nv-oc"
-LOGDIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "results")
-BURN_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tools", "gpu-burn")
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # repo root (script lives in oc/)
+LOGDIR = os.path.join(ROOT, "results")
+BURN_DIR = os.path.join(ROOT, "tools", "gpu-burn")
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CPUTUNE = "/usr/local/bin/cpu-tune"  # vivobook-tune integration: saves offsets to its lab profile

@@ -25,9 +25,12 @@ def info(path, data):
     if data[:4] == b"NVGI":
         v, d = struct.unpack_from("<HH", data, 0xC)
         sub = f"{v:04X}:{d:04X}"
+    pcir = data.find(b"PCIR")
+    dev = "%04X:%04X" % struct.unpack_from("<HH", data, pcir + 4) if pcir >= 0 else "?"
     ver = re.search(rb"Version (\d\d\.\d\d\.[0-9A-F]{2}\.[0-9A-F]{2}\.[0-9A-F]{2})", data)
     name = re.search(rb"([A-Z0-9]{4,} SKU \d+[^\x00]{0,20})", data)
     return (f"{path}: {len(data)} bytes, header {data[:4]!r}, subsystem {sub}, "
+            f"device {dev}{'' if dev == '10DE:25A2' else ' (NOT our chip 10DE:25A2!)'}, "
             f"vBIOS {ver.group(1).decode() if ver else '?'}, "
             f"{name.group(1).decode(errors='replace').strip() if name else ''}")
 

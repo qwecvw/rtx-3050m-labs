@@ -3,15 +3,16 @@
 # MUST be run from a text console (Ctrl+Alt+F2): the NVIDIA driver has to be unloaded.
 #
 #   sudo ./gpu-flash <rom> [nvflash binary]
-#     donor:   sudo ./gpu-flash firmware/donor-acer-60w.rom tools/nvflashk
-#     restore: sudo ./gpu-flash firmware/vbios-full-backup.rom
+#   (run from the repo root)
+#     donor:   sudo vbios/gpu-flash firmware/donor.rom tools/nvflashk
+#     restore: sudo vbios/gpu-flash firmware/vbios-full-backup.rom tools/nvflashk
 #
 # A donor from another board (Board ID mismatch) needs a patched nvflash as the 2nd argument;
 # stock nvflash refuses it. Refuses to run without a verified full backup, on battery or
 # below 50 % charge. GPU clock offsets in the lab profile are reset to 0 (new firmware).
 set -e
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
-here=$(dirname "$(readlink -f "$0")")
+here=$(dirname "$(dirname "$(readlink -f "$0")")")  # repo root
 rom=$(readlink -f "${1:?usage: sudo ./gpu-flash <rom> [nvflash]}")
 nvflash=$(readlink -f "${2:-$(command -v nvflash)}")
 backup=$here/firmware/vbios-full-backup.rom
@@ -36,7 +37,7 @@ echo "=== GPU vBIOS flash ==="
 echo "ROM:     $rom ($(wc -c < "$rom") bytes, SHA256 $(sha256sum "$rom" | cut -c1-16)...)"
 echo "nvflash: $nvflash"
 echo "Backup:  $backup (verified)"
-nvidia-smi --query-gpu=name,vbios_version,power.default_limit,power.max_limit --format=csv,noheader 2>/dev/null || true
+timeout 5 nvidia-smi --query-gpu=name,vbios_version,power.default_limit,power.max_limit --format=csv,noheader 2>/dev/null || echo "(nvidia-smi: GPU not responding, continuing)"
 echo ""
 printf "Type FLASH to continue: "
 read ans
@@ -85,7 +86,7 @@ echo ""
 echo "After reboot, BEFORE any heavy load:"
 echo "  1. nvidia-smi -q -d POWER   (new limits?)"
 echo "  2. 30 s test on BATTERY: compare nvidia-smi power.draw with the laptop total (BAT0 power_now)"
-echo "Restore: sudo ./gpu-flash firmware/vbios-full-backup.rom $nvflash"
+echo "Restore: sudo vbios/gpu-flash firmware/vbios-full-backup.rom $nvflash"
 echo "Rebooting in 10 s (Ctrl+C to stay)..."
 sleep 10
 reboot
