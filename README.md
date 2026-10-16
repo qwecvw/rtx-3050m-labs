@@ -4,7 +4,7 @@
 поиск стабильного разгона ядра и памяти, бэкап и прошивка vBIOS. Проверено на ASUS Vivobook Pro 15
 M6500QC (плата Board ID 02A6, vBIOS 94.07.5B.00.97, 35/50 W), драйвер 595, Linux Mint 21 / ядро 6.8.
 
-Меню и управление питанием ноутбука целиком: [vivobook-tune](ssh://git@git.coboto.ru:30909/yura/vivobook-tune.git).
+Меню и управление питанием ноутбука целиком: [vivobook-tune](https://github.com/qwecvw/viiobook-tune).
 Если он установлен, скрипты отсюда работают через его `cpu-tune` и требуют lab-режима со сторожем `hw-lab`.
 Без него скрипты ставят частоты сами (через sudo), а за температурой нужно следить вручную.
 
@@ -21,7 +21,7 @@ SHA256 `bc369185…63bc7e7`) и патчер [nvflashk-linux](https://github.com
 (читает файл, меняет 9 байт в двух местах, сверяет SHA256 на входе и выходе, сети и `unsafe` нет):
 
 ```sh
-git clone --recurse-submodules ssh://git@git.coboto.ru:30909/yura/rtx-3050m-labs.git
+git clone --recurse-submodules https://github.com/qwecvw/rtx-3050m-labs.git
 unzip nvflash_5.792_linux.zip -d tools/nvflash-5.792
 vbios/make-nvflashk tools/nvflash-5.792/x64/nvflash      # нужен Rust (rustup.rs) -> tools/nvflashk
 ```
